@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# tile-mode: one keypress per tiling layout, saved per Hyprland workspace.
+#
+#   tile-mode 1|2|3|4 [--workspace ID]  set the mode (focused workspace by default)
+#   tile-mode next [--workspace ID]     cycle to the next mode
+#   tile-mode status [--workspace ID]   print the mode as T-N
+#   tile-mode watch                     keep split widths applied as windows open (run at startup)
+#
+#   T-1 default layout, T-2 2/3 | 1/3, T-3 1/3 | 1/3 | 1/3, T-4 1/5 | 3/5 | 1/5
+#
+# Needs jq and socat. Works with Lua configs (hyprland.lua) and classic hyprland.conf.
+# The syntax is detected from your config folder; set TILE_MODE_SYNTAX=lua|conf to override.
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tile-mode"
+HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+
+if [[ -n $TILE_MODE_SYNTAX ]]; then
+  SYNTAX=$TILE_MODE_SYNTAX
+elif [[ -f $HYPR_DIR/hyprland.lua ]]; then
+  SYNTAX=lua
+else
+  SYNTAX=conf
+fi
+
+usage() {
+  echo "usage: tile-mode 1|2|3|4|next|status [--workspace ID] | watch" >&2
+  exit 1
+}
+
+lua_rule() {
+  local ws=$1 mode=$2
+  case "$mode" in
+    2) printf 'hl.workspace_rule({ workspace = "%s", layout = "master", layout_opts = { orientation = "left" } })' "$ws" ;;
+    3 | 4) printf 'hl.workspace_rule({ workspace = "%s", layout = "master", layout_opts = { orientation = "center" } })' "$ws" ;;
+  esac
+}
+
+conf_rule() {
+  local ws=$1 mode=$2
+  case "$mode" in
+    2) printf 'workspace = %s, layout:master, layoutopt:orientation:left' "$ws" ;;
+    3 | 4) printf 'workspace = %s, layout:master, layoutopt:orientation:center' "$ws" ;;
+  esac
+}
+
+mfact_for() {
+  case "$1" in
+    2) echo 0.6667 ;;
+    3) echo 0.3333 ;;
+    4) echo 0.6 ;;
+  esac
+}
+
+focused_workspace() {
+  hyprctl activeworkspace -j | jq -r '.id'
+}
+
+mode_of() {
+  cat "$STATE_DIR/ws-$1" 2>/dev/null || echo 1
+}
+
+apply_mfact() {
+  local mfact
+  mfact=$(mfact_for "$1")
+  [[ -n $mfact ]] || return
+  if [[ $SYNTAX == lua ]]; then
+    hyprctl dispatch "hl.dsp.layout(\"mfact exact $mfact\")" >/dev/null 2>&1
+  else
+    hyprctl dispatch layoutmsg mfact exact "$mfact" >/dev/null 2>&1
+  fi
+}
+
+notify() {
+  if command -v omarchy-notification-send >/dev/null; then
+    omarchy-notification-send -g 󱂬 "$1" >/dev/null 2>&1 &
+  elif command -v notify-send >/dev/null; then
+    notify-send -a tile-mode -t 1500 "$1" >/dev/null 2>&1 &
+  fi
+}
+
+# Lua: one ws-<ID>.lua per workspace, loaded at the end of hyprland.lua.
+# conf: a single rules.conf, sourced at the end of hyprland.conf.
+# T-1 writes no rule, so the default layout applies again.
+save_rules() {
+  local ws=$1 mode=$2 file rule
+  if [[ $SYNTAX == lua ]]; then
+    if [[ $mode == 1 ]]; then
+      rm -f "$STATE_DIR/ws-$ws.lua"
+    else
+      lua_rule "$ws" "$mode" >"$STATE_DIR/ws-$ws.lua"
+    fi
+  else
+    for file in "$STATE_DIR"/ws-*; do
+      [[ $file =~ /ws-([0-9]+)$ ]] || continue
+      rule=$(conf_rule "${BASH_REMATCH[1]}" "$(<"$file")")
+      [[ -n $rule ]] && printf '%s\n' "$rule"
+    done >"$STATE_DIR/rules.conf"
+  fi
+}
+
+set_mode() {
+  local mode=$1 ws=$2
+  # Regular workspaces only; special (scratchpad) workspaces have negative ids.
+  [[ $ws =~ ^[0-9]+$ ]] || exit 1
+
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$mode" >"$STATE_DIR/ws-$ws"
+  save_rules "$ws" "$mode"
+
+  # Reload rather than setting the rule live: the saved rules load at the end of
+  # the config, so after a reload they win over earlier rules for the same workspace.
+  hyprctl reload >/dev/null 2>&1
+  [[ $ws == "$(focused_workspace)" ]] && apply_mfact "$mode"
+  notify "Workspace $ws: tiling T-$mode"
+}
+
+watch_events() {
+  local sock="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+  local -A applied=()
+  local event ws mode key
+
+  socat -U - "UNIX-CONNECT:$sock" | while IFS= read -r event; do
+    case "$event" in
+      openwindow\>\>* | workspacev2\>\>* | focusedmonv2\>\>*) ;;
+      *) continue ;;
+    esac
+
+    ws=$(focused_workspace)
+    mode=$(mode_of "$ws")
+    [[ $mode == 1 ]] && continue
+
+    # A new window may become the master, which starts at the default width.
+    # Otherwise set each workspace once per mode change, so manual resizes stick.
+    key="$ws|$mode|$(stat -c %Y "$STATE_DIR/ws-$ws" 2>/dev/null)"
+    if [[ $event == openwindow* || -z ${applied[$key]} ]]; then
+      applied[$key]=1
+      apply_mfact "$mode"
+    fi
+  done
+}
+
+cmd=$1
+shift
+ws=
+if [[ $1 == --workspace ]]; then
+  ws=$2
+  shift 2
+fi
+(($#)) && usage
+[[ $cmd != watch && -z $ws ]] && ws=$(focused_workspace)
+
+case "$cmd" in
+  watch) watch_events ;;
+  status) echo "T-$(mode_of "$ws")" ;;
+  next) set_mode $(($(mode_of "$ws") % 4 + 1)) "$ws" ;;
+  1 | 2 | 3 | 4) set_mode "$cmd" "$ws" ;;
+  *) usage ;;
+esac

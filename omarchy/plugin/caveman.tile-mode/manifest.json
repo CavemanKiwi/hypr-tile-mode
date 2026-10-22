@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "caveman.tile-mode",
+  "name": "Tile mode",
+  "version": "1.0.0",
+  "author": "caveman",
+  "description": "Shows this workspace's tiling mode (T-1/T-2/T-3/T-4); click to cycle",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "TileMode.qml" },
+  "barWidget": {
+    "displayName": "Tile mode",
+    "description": "Per-workspace tiling mode set by tile-mode (SUPER+ALT+1/2/3/4)",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
