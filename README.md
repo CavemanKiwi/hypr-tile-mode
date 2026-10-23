@@ -1,8 +1,8 @@
 # hypr-tile-mode
 
-One keypress per tiling layout, saved per Hyprland workspace.
+One keypress combo per tiling layout, saved per Hyprland workspace.
 
-| Key | Mode | Layout |
+| Key Combo | Mode | Layout |
 |---|---|---|
 | SUPER+ALT+1 | T-1 | Your default layout (e.g. dwindle) |
 | SUPER+ALT+2 | T-2 | Main window 2/3 on the left, others stacked in the right 1/3 |
